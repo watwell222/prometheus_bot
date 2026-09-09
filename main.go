@@ -7,10 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -389,7 +389,7 @@ func SplitString(s string, n int) []string {
 func main() {
 	flag.Parse()
 
-	content, err := ioutil.ReadFile(*config_path)
+	content, err := os.ReadFile(*config_path)
 	if err != nil {
 		log.Fatalf("Problem reading configuration file: %v", err)
 	}
@@ -403,7 +403,7 @@ func main() {
 	}
 
 	if *token_path != "" {
-		content, err := ioutil.ReadFile(*token_path)
+		content, err := os.ReadFile(*token_path)
 		if err != nil {
 			log.Fatalf("Problem reading token file: %v", err)
 		}
@@ -630,7 +630,7 @@ func POST_Handling(c *gin.Context) {
 
 	log.Println("+------------------  A L E R T  J S O N  -------------------+")
 	log.Printf("%s", s)
-	log.Println("+-----------------------------------------------------------+\n\n")
+	log.Println("+-----------------------------------------------------------+")
 
 	// Decide how format Text
 	if cfg.TemplatePath == "" {
