@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the codebase.
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install hadolint.
         run: |
@@ -30,14 +30,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the codebase.
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set image name
+        id: vars
+        run: echo "image=${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID}" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Образ в реестр не пушится: load=true кладёт его в локальный демон
+      # раннера, и дальше и smoke-тест, и Trivy работают с ним по тегу.
       - name: Build docker image.
-        run: docker build --no-cache --tag ${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID} .
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          no-cache: true
+          tags: ${{ steps.vars.outputs.image }}
 
       - name: Run a container of created image.
         run: |
-          DOCKERCONTAINER=$(docker run -d ${GITHUB_REPOSITORY,,}:${GITHUB_RUN_ID})
+          DOCKERCONTAINER=$(docker run -d ${{ steps.vars.outputs.image }})
           sleep 5
           echo "DOCKERCONTAINER=$DOCKERCONTAINER" >> $GITHUB_ENV
 
@@ -46,3 +61,97 @@ jobs:
 
       - name: Check if the container is correctly stopped and removed.
         run: docker stop ${DOCKERCONTAINER} && docker rm -fv ${DOCKERCONTAINER}
+
+      # image-src=docker: сканируем ровно то, что только что собрали и
+      # загрузили в демон этого раннера. Раннер ubuntu-latest одноразовый,
+      # тег содержит run_id — подсунуть под него чужой образ неоткуда.
+      # В реестр не ходим, поэтому и кредов не нужно.
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}
+          format: 'table'
+          output: 'trivy-summary.txt'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'  # это отчёт; сборку валит шаг Fail on CRITICAL ниже
+        env:
+          TRIVY_IMAGE_SRC: docker
+
+      - name: Generate Trivy detailed report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}
+          format: 'json'
+          output: 'trivy-report.json'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+        env:
+          TRIVY_IMAGE_SRC: docker
+
+      - name: Upload Trivy reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        continue-on-error: true
+        with:
+          name: trivy-reports
+          path: |
+            trivy-summary.txt
+            trivy-report.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Generate Security Summary
+        if: always()
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f trivy-report.json ]; then
+            CRITICAL=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json || echo "0")
+            HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-report.json || echo "0")
+            MEDIUM=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-report.json || echo "0")
+            LOW=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="LOW")] | length' trivy-report.json || echo "0")
+
+            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| CRITICAL | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| HIGH | $HIGH |" >> $GITHUB_STEP_SUMMARY
+            echo "| MEDIUM | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
+            echo "| LOW | $LOW |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo "<details>" >> $GITHUB_STEP_SUMMARY
+              echo "<summary>CRITICAL/HIGH details</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              head -50 trivy-summary.txt >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "No critical or high severity vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "No security scan results available" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Гейт, а не отчёт. Порог CRITICAL; HIGH остаётся в отчёте и сборку
+      # не валит. Отсутствие отчёта — тоже отказ: шаг не должен пропускать
+      # образ только потому, что сканирование не состоялось.
+      - name: Fail on CRITICAL vulnerabilities
+        run: |
+          if [ ! -f trivy-report.json ]; then
+            echo "::error::Отчёт Trivy отсутствует — сканирование не состоялось"
+            exit 1
+          fi
+
+          CRITICAL=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json)
+
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::Trivy нашёл CRITICAL-уязвимостей: $CRITICAL"
+            jq -r '.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")
+              | "\(.VulnerabilityID)\t\(.PkgName)@\(.InstalledVersion) -> \(.FixedVersion // "нет фикса")"' \
+              trivy-report.json | sort -u
+            exit 1
+          fi
+
+          echo "CRITICAL-уязвимостей нет"
