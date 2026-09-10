@@ -9,6 +9,15 @@
       - [Support this functions list](#support-this-functions-list)
   * [Production example](#production-example)
 
+## За что отвечает
+
+Телеграм-бот для Alertmanager: принимает уведомления Prometheus и шлёт их в чат.
+Стороннее решение, подключённое в инфраструктуре.
+
+**Границы.** Алертинг платформы построен на Grafana, а доставка уведомлений и
+тикеты — `hydroops`. Этот бот относится к инфраструктурному мониторингу, а не к
+продуктовым алертам устройств.
+
 # prometheus_bot
 
 This bot is designed to alert messages from [alertmanager](https://github.com/prometheus/alertmanager).
